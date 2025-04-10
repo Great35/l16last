@@ -1,0 +1,19 @@
+{
+  "name": "lemon_bot",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "http": "^0.0.1-security",
+    "mongodb": "^4.17.2",
+    "node-cron": "^3.0.3",
+    "socket.io": "^4.8.1",
+    "telegraf": "^4.16.3",
+    "telegraf-session-mongodb": "^2.0.2"
+  }
+}
