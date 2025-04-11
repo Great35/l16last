@@ -1,85 +1,24 @@
-import dotenv from 'dotenv';
-import { Telegraf, session, Markup } from 'telegraf';
-import { MongoClient } from 'mongodb';
-import express from 'express';
-import cron from 'node-cron';
-import { config } from './config.js';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { Server } from 'socket.io';
-import http from 'http';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-dotenv.config();
-
-const { botToken, mongoURI } = config;
-if (!botToken || !mongoURI) {
-    console.error('❌ Missing BOT_TOKEN or MONGO_URI in config or .env');
-    process.exit(1);
-}
-
-// Express and Socket.IO Setup
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server);
-const PORT = process.env.PORT || 3000;
-const HOST = '0.0.0.0';
-
-// MongoDB Setup
-const client = new MongoClient(mongoURI);
-let db, usersCollection, logsCollection;
-
-async function initialize() {
-    try {
-        await client.connect();
-        db = client.db('lemon16_db');
-        usersCollection = db.collection('users');
-        logsCollection = db.collection('logs');
-        console.log('✅ Connected to MongoDB');
-    } catch (error) {
-        console.error('❌ MongoDB Connection Error:', error);
-        process.exit(1);
-    }
-}
-
-// Middleware Setup
-app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json());
-
-// Dashboard Route
 app.get('/dashboard', async (req, res) => {
     try {
         const totalUsers = await usersCollection.countDocuments();
         const premiumUsers = await usersCollection.countDocuments({ isSubscribed: true });
         const freeUsers = totalUsers - premiumUsers;
         const today = new Date().setHours(0, 0, 0, 0);
-        // Count mutual matches today (users who liked each other)
         const matchesToday = await usersCollection.aggregate([
-            { $match: { lastSwipe: { $gte: new Date(today) } } },
-            { $unwind: '$likedUsers' },
-            {
-                $lookup: {
-                    from: 'users',
-                    localField: 'likedUsers',
-                    foreignField: 'userId',
-                    as: 'likedUserData'
-                }
-            },
-            { $unwind: '$likedUserData' },
+            { $match: { lastSwipe: { $gte: new Date(today), $exists: true }, likedUsers: { $exists: true, $ne: [] } } },
+            { $unwind: { path: '$likedUsers', preserveNullAndEmptyArrays: true } },
+            { $lookup: { from: 'users', localField: 'likedUsers', foreignField: 'userId', as: 'likedUserData' } },
+            { $unwind: { path: '$likedUserData', preserveNullAndEmptyArrays: true } },
             { $match: { 'likedUserData.likedUsers': { $in: ['$userId'] } } },
             { $group: { _id: null, count: { $sum: 1 } } }
         ]).toArray();
-        const matchesCount = matchesToday.length > 0 ? matchesToday[0].count / 2 : 0; // Divide by 2 since each match is counted twice
-
+        const matchesCount = matchesToday.length > 0 ? Math.floor(matchesToday[0].count / 2) : 0;
         const allUsers = await usersCollection.find({}).toArray();
         const recentLogs = await logsCollection.find({}).sort({ timestamp: -1 }).limit(10).toArray();
-        const inactiveThreshold = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // 30 days ago
+        const inactiveThreshold = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
         const inactiveUsers = await usersCollection.countDocuments({ lastSwipe: { $lt: inactiveThreshold } });
 
         let userListHtml = `
-           
             <table class="user-table" id="user-table">
                 <thead>
                     <tr>
@@ -87,6 +26,8 @@ app.get('/dashboard', async (req, res) => {
                         <th>Status</th>
                         <th>Swipes</th>
                         <th>Last Active</th>
+                        <th>Joined</th>
+                        <th>Banned</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
@@ -97,8 +38,10 @@ app.get('/dashboard', async (req, res) => {
                 <tr>
                     <td>${user.name || 'No Name'}</td>
                     <td>${user.isSubscribed ? 'Premium ✨' : 'Free'}</td>
-                    <td>${user.swipeCount}</td>
+                    <td>${user.swipeCount ?? '0'}</td>
                     <td>${user.lastSwipe ? new Date(user.lastSwipe).toLocaleDateString() : 'Never'}</td>
+                    <td>${user.joinDate ? new Date(user.joinDate).toLocaleDateString() : 'Unknown'}</td>
+                    <td>${user.isBanned ? 'Yes' : 'No'}</td>
                     <td>
                         <button onclick="showUserDetails('${user.userId}')">View</button>
                         <button class="ban-btn" onclick="banUser('${user.userId}')">${user.isBanned ? 'Unban' : 'Ban'}</button>
@@ -117,142 +60,116 @@ app.get('/dashboard', async (req, res) => {
         logListHtml += '</ul>';
 
         const html = `
-           <!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Lemon16 Bot Admin Dashboard - Manage users, track stats, and monitor activity in real-time.">
-    <meta name="author" content="xAI">
-    <title>Lemon16</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="/styles.css">
-    <link rel="icon" href="photo_5996864734789485764_x.jpg" type="image/x-icon">
-</head>
-<body>
-    <div class="container">
-        <!-- Header -->
-        <header class="dashboard-header">
-            <div class="logo">
-            
-                <h1>Lemon16 bot</h1>
-            </div>
-            <nav class="header-actions">
-               
-            </nav>
-        </header>
-<section class="stats" aria-labelledby="stats-heading">
-    <h2 id="stats-heading" class="sr-only">Statistics</h2>
-    <div class="stats-grid">
-        <div class="stats-card total-users" data-tooltip="Total number of users">
-            <i class="fas fa-users stats-icon"></i>
-            <strong>Total Users</strong>
-            <div class="stats-value" id="total-users">0</div>
-        </div>
-        <div class="stats-card premium-users" data-tooltip="Users with premium subscription">
-            <i class="fas fa-crown stats-icon"></i>
-            <strong>Premium Users</strong>
-            <div class="stats-value" id="premium-users">0</div>
-        </div>
-        <div class="stats-card free-users" data-tooltip="Users on free plan">
-            <i class="fas fa-user stats-icon"></i>
-            <strong>Free Users</strong>
-            <div class="stats-value" id="free-users">0</div>
-        </div>
-        <div class="stats-card matches-today" data-tooltip="Matches made today">
-            <i class="fas fa-heart stats-icon"></i>
-            <strong>Matches Today</strong>
-            <div class="stats-value" id="matches-today">0</div>
-        </div>
-        <div class="stats-card inactive-users" data-tooltip="Users inactive for 30+ days">
-            <i class="fas fa-user-slash stats-icon"></i>
-            <strong>Inactive Users</strong>
-            <div class="stats-value" id="inactive-users">0</div>
-            <div class="inactive-actions">
-                <button class="small-btn" onclick="messageInactive()">Message</button>
-                <button class="small-btn delete-btn" onclick="deleteInactive()">Delete</button>
-            </div>
-        </div>
-    </div>
-</section>
-       
-
-        <!-- Action Buttons -->
-        <section class="action-buttons" aria-labelledby="actions-heading">
-            <h2 class="sr-only" id="actions-heading">Quick Actions</h2>
-            <button class="reset-btn" onclick="resetSwipes()" aria-label="Reset free user swipes" title="Reset swipe counts for all free users">
-                <i class="fas fa-sync-alt"></i> Reset All Free User Swipes
-            </button>
-        </section>
-
-        <!-- Users Table -->
-        <section class="users-section" aria-labelledby="users-heading">
-            <h2 id="users-heading">All Users</h2>
-            <div class="search-bar">
-                <input type="text" id="user-search" placeholder="Search users by name..." aria-label="Search users" onkeyup="searchUsers()">
-                <i class="fas fa-search search-icon"></i>
-            </div>
-            ${userListHtml} <!-- Assuming this is a <table class="user-table" id="user-table"> from your JS -->
-        </section>
-
-        <!-- User Details Modal -->
-        <div id="user-details-modal" class="user-details-modal" role="dialog" aria-labelledby="modal-title" aria-hidden="true">
-            <div class="modal-content">
-                <button class="modal-close" aria-label="Close modal" onclick="closeModal()">
-                    <i class="fas fa-times"></i>
-                </button>
-                <div id="user-details" class="user-details">
-                    <!-- Populated by JS -->
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <meta name="description" content="Lemon16 Bot Admin Dashboard - Manage users, track stats, and monitor activity in real-time.">
+                <meta name="author" content="xAI">
+                <title>Lemon16</title>
+                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+                <link rel="stylesheet" href="/styles.css">
+                <link rel="icon" href="photo_5996864734789485764_x.jpg" type="image/x-icon">
+            </head>
+            <body>
+                <div class="container">
+                    <header class="dashboard-header">
+                        <div class="logo">
+                            <h1>Lemon16 bot</h1>
+                        </div>
+                        <nav class="header-actions"></nav>
+                    </header>
+                    <section class="stats" aria-labelledby="stats-heading">
+                        <h2 id="stats-heading" class="sr-only">Statistics</h2>
+                        <div class="stats-grid">
+                            <div class="stats-card total-users" data-tooltip="Total number of users">
+                                <i class="fas fa-users stats-icon"></i>
+                                <strong>Total Users</strong>
+                                <div class="stats-value" id="total-users">${totalUsers}</div>
+                            </div>
+                            <div class="stats-card premium-users" data-tooltip="Users with premium subscription">
+                                <i class="fas fa-crown stats-icon"></i>
+                                <strong>Premium Users</strong>
+                                <div class="stats-value" id="premium-users">${premiumUsers}</div>
+                            </div>
+                            <div class="stats-card free-users" data-tooltip="Users on free plan">
+                                <i class="fas fa-user stats-icon"></i>
+                                <strong>Free Users</strong>
+                                <div class="stats-value" id="free-users">${freeUsers}</div>
+                            </div>
+                            <div class="stats-card matches-today" data-tooltip="Matches made today">
+                                <i class="fas fa-heart stats-icon"></i>
+                                <strong>Matches Today</strong>
+                                <div class="stats-value" id="matches-today">${matchesCount}</div>
+                            </div>
+                            <div class="stats-card inactive-users" data-tooltip="Users inactive for 30+ days">
+                                <i class="fas fa-user-slash stats-icon"></i>
+                                <strong>Inactive Users</strong>
+                                <div class="stats-value" id="inactive-users">${inactiveUsers}</div>
+                                <div class="inactive-actions">
+                                    <button class="small-btn" onclick="messageInactive()">Message</button>
+                                    <button class="small-btn delete-btn" onclick="deleteInactive()">Delete</button>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                    <section class="action-buttons" aria-labelledby="actions-heading">
+                        <h2 class="sr-only" id="actions-heading">Quick Actions</h2>
+                        <button class="reset-btn" onclick="resetSwipes()" aria-label="Reset free user swipes" title="Reset swipe counts for all free users">
+                            <i class="fas fa-sync-alt"></i> Reset All Free User Swipes
+                        </button>
+                    </section>
+                    <section class="users-section" aria-labelledby="users-heading">
+                        <h2 id="users-heading">All Users</h2>
+                        <div class="search-bar">
+                            <input type="text" id="user-search" placeholder="Search users by name..." aria-label="Search users" onkeyup="searchUsers()">
+                            <i class="fas fa-search search-icon"></i>
+                        </div>
+                        ${userListHtml}
+                    </section>
+                    <div id="user-details-modal" class="user-details-modal" role="dialog" aria-labelledby="modal-title" aria-hidden="true">
+                        <div class="modal-content">
+                            <button class="modal-close" aria-label="Close modal" onclick="closeModal()">
+                                <i class="fas fa-times"></i>
+                            </button>
+                            <div id="user-details" class="user-details"></div>
+                        </div>
+                    </div>
+                    <section class="activity-log" id="activity-log" aria-labelledby="log-heading">
+                        <h2 id="log-heading">Activity Log</h2>
+                        ${logListHtml}
+                    </section>
+                    <footer class="dashboard-footer">
+                        <p>© ${new Date().getFullYear()} Lemon16 Bot. Powered by <a href="" target="_blank" rel="noopener noreferrer">luna</a>.</p>
+                    </footer>
                 </div>
-            </div>
-        </div>
-
-        <!-- Activity Log -->
-        <section class="activity-log" id="activity-log" aria-labelledby="log-heading">
-            <h2 id="log-heading">Activity Log</h2>
-            ${logListHtml} <!-- Assuming this is a <ul id="log-list"> from your JS -->
-        </section>
-
-        <!-- Footer -->
-        <footer class="dashboard-footer">
-            <p>&copy; ${new Date().getFullYear()} Lemon16 Bot. Powered by <a href="" target="_blank" rel="noopener noreferrer">luna</a>.</p>
-        </footer>
-    </div>
-
-    <!-- Scripts -->
-    <script src="/socket.io/socket.io.js"></script>
-    <script src="/dashboard.js"></script>
-    <script>
-        // Modal Control
-        function closeModal() {
-            document.getElementById('user-details-modal').classList.remove('show');
-            document.body.classList.remove('modal-open');
-        }
-
-        // Add showModal to your existing showUserDetails function in dashboard.js
-        document.addEventListener('DOMContentLoaded', () => {
-            document.querySelectorAll('.user-table button[onclick^="showUserDetails"]').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    document.getElementById('user-details-modal').classList.add('show');
-                    document.body.classList.add('modal-open');
-                });
-            });
-
-            // Close on outside click
-            document.getElementById('user-details-modal').addEventListener('click', (e) => {
-                if (e.target === e.currentTarget) closeModal();
-            });
-
-            // Escape key to close
-            document.addEventListener('keydown', (e) => {
-                if (e.key === 'Escape' && document.getElementById('user-details-modal').classList.contains('show')) {
-                    closeModal();
-                }
-            });
-        });
-    </script>
-</body>
-</html>
+                <script src="/socket.io/socket.io.js"></script>
+                <script src="/dashboard.js"></script>
+                <script>
+                    function closeModal() {
+                        document.getElementById('user-details-modal').classList.remove('show');
+                        document.body.classList.remove('modal-open');
+                    }
+                    document.addEventListener('DOMContentLoaded', () => {
+                        document.querySelectorAll('.user-table button[onclick^="showUserDetails"]').forEach(btn => {
+                            btn.addEventListener('click', () => {
+                                document.getElementById('user-details-modal').classList.add('show');
+                                document.body.classList.add('modal-open');
+                            });
+                        });
+                        document.getElementById('user-details-modal').addEventListener('click', (e) => {
+                            if (e.target === e.currentTarget) closeModal();
+                        });
+                        document.addEventListener('keydown', (e) => {
+                            if (e.key === 'Escape' && document.getElementById('user-details-modal').classList.contains('show')) {
+                                closeModal();
+                            }
+                        });
+                    });
+                </script>
+            </body>
+            </html>
         `;
         console.log('Dashboard loaded successfully');
         res.send(html);
