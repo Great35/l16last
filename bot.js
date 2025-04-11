@@ -1,3 +1,54 @@
+import dotenv from 'dotenv';
+import { Telegraf, session, Markup } from 'telegraf';
+import { MongoClient } from 'mongodb';
+import express from 'express';
+import cron from 'node-cron';
+import { config } from './config.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { Server } from 'socket.io';
+import http from 'http';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config();
+
+const { botToken, mongoURI } = config;
+if (!botToken || !mongoURI) {
+    console.error('❌ Missing BOT_TOKEN or MONGO_URI in config or .env');
+    process.exit(1);
+}
+
+// Express and Socket.IO Setup
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+const PORT = process.env.PORT || 3000;
+const HOST = '0.0.0.0';
+
+// MongoDB Setup
+const client = new MongoClient(mongoURI);
+let db, usersCollection, logsCollection;
+
+async function initialize() {
+    try {
+        await client.connect();
+        db = client.db('lemon16_db');
+        usersCollection = db.collection('users');
+        logsCollection = db.collection('logs');
+        console.log('✅ Connected to MongoDB');
+    } catch (error) {
+        console.error('❌ MongoDB Connection Error:', error);
+        process.exit(1);
+    }
+}
+
+// Middleware Setup
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json());
+
+// Dashboard Route
 app.get('/dashboard', async (req, res) => {
     try {
         const totalUsers = await usersCollection.countDocuments();
